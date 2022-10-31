@@ -255,6 +255,7 @@ static bool				dryrun = false;
 static unsigned int		temp_obj_num = 0; /* temporary objects counter */
 static bool				no_kill_backend = false; /* abandon when timed-out */
 static bool				no_superuser_check = false;
+static bool				allow_duplicates = false; /* allow duplicates in unique index */
 static SimpleStringList	exclude_extension_list = {NULL, NULL}; /* don't repack tables of these extensions */
 
 /* buffer should have at least 11 bytes */
@@ -285,6 +286,7 @@ static pgut_option options[] =
 	{ 'b', 'D', "no-kill-backend", &no_kill_backend },
 	{ 'b', 'k', "no-superuser-check", &no_superuser_check },
 	{ 'l', 'C', "exclude-extension", &exclude_extension_list },
+	{ 'b', 'A', "allow-duplicates", &allow_duplicates },
 	{ 0 },
 };
 
@@ -1324,11 +1326,20 @@ repack_one_table(repack_table *table, const char *orderby)
 		elog(WARNING, "skipping invalid index: %s", indexdef);
 	}
 
-	indexres = execute(
-		"SELECT indexrelid,"
-		" repack.repack_indexdef(indexrelid, indrelid, $2, FALSE) "
-		" FROM pg_index WHERE indrelid = $1 AND indisvalid",
-		2, indexparams);
+	/* Remove unique constraint in unique index if duplicates are allowed */
+	if (allow_duplicates)
+		indexres = execute(
+			"SELECT indexrelid,"
+			" regexp_replace(repack.repack_indexdef(indexrelid, indrelid, $2, FALSE), "
+			" '^CREATE UNIQUE INDEX', 'CREATE INDEX') "
+			" FROM pg_index WHERE indrelid = $1 AND indisvalid",
+			2, indexparams);
+	else
+		indexres = execute(
+			"SELECT indexrelid,"
+			" repack.repack_indexdef(indexrelid, indrelid, $2, FALSE) "
+			" FROM pg_index WHERE indrelid = $1 AND indisvalid",
+			2, indexparams);
 
 	table->n_indexes = PQntuples(indexres);
 	table->indexes = pgut_malloc(table->n_indexes * sizeof(repack_index));
@@ -2101,8 +2112,14 @@ repack_table_indexes(PGresult *index_details)
 				continue;
 
 			params[0] = utoa(index, buffer[0]);
-			res = execute("SELECT repack.repack_indexdef($1, $2, $3, true)", 3,
-						  params);
+			/* Remove unique constraint in unique index if duplicates are allowed */
+			if (allow_duplicates)
+				res = execute("SELECT regexp_replace(repack.repack_indexdef($1, $2, $3, true), "
+							  "'^CREATE UNIQUE INDEX', 'CREATE INDEX')", 3,
+							  params);
+			else
+				res = execute("SELECT repack.repack_indexdef($1, $2, $3, true)", 3,
+							  params);
 
 			if (PQntuples(res) < 1)
 			{
@@ -2355,4 +2372,5 @@ pgut_help(bool details)
 	printf("  -Z, --no-analyze          don't analyze at end\n");
 	printf("  -k, --no-superuser-check  skip superuser checks in client\n");
 	printf("  -C, --exclude-extension   don't repack tables which belong to specific extension\n");
+	printf("  -A, --allow-duplicates    allow duplicates when repacking unique index\n");
 }
